@@ -1,5 +1,6 @@
 import telebot
 import json
+import sqlite3
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from flask import Flask
 from threading import Thread
@@ -7,27 +8,105 @@ import telebot.util
 from telebot.formatting import escape_markdown  # Import hàm escape_markdown
 
 # ✅ Cấu hình bot
-TOKEN = "7815604030:AAELtDIikq3XylIwzwITArq-kjrFP6EFwsM"
+TOKEN = "7470737695:AAG1hWkTivI1DiWZOc_CzBrmb8nbsguJU-U"
 ADMIN_ID = 6283529520  # Thay bằng Telegram ID của admin
 
 bot = telebot.TeleBot(TOKEN)
 
+# Kết nối database
+conn = sqlite3.connect("database.db", check_same_thread=False)
+cursor = conn.cursor()
+
+# Tạo bảng nếu chưa có
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        balance REAL DEFAULT 0,
+        last_bill TEXT
+    )
+''')
+
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bypass_link TEXT UNIQUE,
+        original_link TEXT,
+        price REAL
+    )
+''')
+
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        amount REAL,
+        type TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+''')
+conn.commit()
+
+# Hàm lấy số dư
+def get_balance(user_id):
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    return result[0] if result else 0
+
+
+# Hàm cập nhật số dư
+def update_balance(user_id, amount):
+    cursor.execute("INSERT INTO users (user_id, balance) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET balance = balance + ?",
+                   (user_id, amount, amount))
+    cursor.execute("INSERT INTO transactions (user_id, amount, type) VALUES (?, ?, ?)",
+                   (user_id, amount, "deposit" if amount > 0 else "purchase"))
+    conn.commit()
+
+
+# Hàm thêm link vào DB (Admin)
+def add_link(bypass_link, original_link, price):
+    try:
+        cursor.execute("INSERT INTO links (bypass_link, original_link, price) VALUES (?, ?, ?)",
+                       (bypass_link, original_link, price))
+        conn.commit()
+        return "✅ Link đã được thêm!"
+    except sqlite3.IntegrityError:
+        return "⚠️ Link này đã tồn tại!"
+
+
+# Hàm lấy giá và link gốc
+def get_link(bypass_link):
+    cursor.execute("SELECT original_link, price FROM links WHERE bypass_link = ?", (bypass_link,))
+    return cursor.fetchone()
+
 # Định dạng số tiền
 def format_currency(amount):
-    return "{:,}".format(amount).replace(",", ".")
+    return "{:,}".format(int(float(amount))).replace(",", ".")
 
 
-# ✅ Load & Lưu dữ liệu JSON
-def load_data():
-    try:
-        with open("data.json", "r") as file:
-            return json.load(file)
-    except:
-        return {"users": {}, "links": {}}
+# Database helper functions
+def get_user_balance(telegram_id):
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,))
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        return f"{int(result[0]):,} VNĐ".replace(",", ".")
+    return None
 
-def save_data(data):
-    with open("data.json", "w") as file:
-        json.dump(data, file, indent=4)
+def set_user_balance(user_id, balance):
+    cursor.execute("INSERT OR REPLACE INTO users (user_id, balance) VALUES (?, ?)", (user_id, balance))
+    conn.commit()
+
+def get_link_info(bypass_link):
+    cursor.execute("SELECT original_link, price FROM links WHERE bypass_link = ?", (bypass_link,))
+    result = cursor.fetchone()
+    return {"url": result[0], "price": result[1]} if result else None
+
+def save_link(bypass_link, original_link, price):
+    cursor.execute("INSERT OR REPLACE INTO links (bypass_link, original_link, price) VALUES (?, ?, ?)", 
+                  (bypass_link, original_link, price))
+    conn.commit()
 
 
 #Thêm TB
@@ -42,15 +121,15 @@ def send_announcement(message):
 
 def process_announcement(message):
     content = message.text
-    data = load_data()
-    users = data["users"]
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
 
     if not users:
         bot.send_message(ADMIN_ID, "❌ Không có người dùng nào để gửi thông báo.")
         return
 
     success_count = 0
-    for user_id in users.keys():
+    for (user_id,) in users:
         try:
             bot.send_message(user_id, f"📢 *Thông báo từ Admin:*\n{content}", parse_mode="Markdown")
             success_count += 1
@@ -63,26 +142,23 @@ def process_announcement(message):
 # ✅ /start - Chào mừng khách hàng
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-    user_id = str(message.chat.id)
-    data = load_data()
+    user_id = message.chat.id
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
+    conn.commit()
 
-    if user_id not in data["users"]:
-        data["users"][user_id] = {"balance": 0}
-        save_data(data)
-
-    bot.send_message(message.chat.id, "🤖 Chào mừng! Bạn có thể:\n"
+    bot.send_message(message.chat.id, "🤖 Chào mừng đến BOT mua link! Bạn có thể:\n"
                                       "💰 /nap_tien - Nạp tiền\n"
                                       "🔍 /so_du - Kiểm tra số dư\n"
-                                      "🛒 /mua_link [link vượt] - Mua link")
+                                      "🛒 /mua_link - Mua link")
 
 # ✅ /so_du - Kiểm tra số dư
 @bot.message_handler(commands=["so_du"])
 def check_balance(message):
-    user_id = str(message.chat.id)
-    data = load_data()
-
-    balance = data["users"].get(user_id, {}).get("balance", 0)
-    formatted_balance = format_currency(balance)# Định dạng tiền
+    user_id = message.chat.id
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    balance = int(result[0]) if result else 0
+    formatted_balance = "{:,}".format(balance).replace(",", ".")
 
     bot.send_message(message.chat.id, f"💰 Số dư của bạn: {formatted_balance} VND")
 
@@ -113,26 +189,29 @@ def deposit_money(message):
 # ✅ Lưu ảnh bill khi khách hàng gửi
 @bot.message_handler(content_types=["photo"])
 def handle_bill_photo(message):
-    user_id = str(message.chat.id)
-    file_id = message.photo[-1].file_id  
+    user_id = message.chat.id
+    file_id = message.photo[-1].file_id
 
-    data = load_data()
-    data["users"][user_id]["last_bill"] = file_id
-    save_data(data)
+    # First ensure the user exists in the database
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
+    # Then update their last_bill
+    cursor.execute("UPDATE users SET last_bill = ? WHERE user_id = ?", (file_id, user_id))
+    conn.commit()
 
     bot.send_message(message.chat.id, "✅BILL ĐÃ ĐƯỢC LƯU! Nhấn /XACNHAN để gửi.")
 
 # ✅ /XACNHAN - Gửi bill cho admin xác nhận
 @bot.message_handler(commands=["XACNHAN"])
 def confirm_deposit(message):
-    user_id = str(message.chat.id)
-    data = load_data()
+    user_id = message.chat.id
+    cursor.execute("SELECT last_bill FROM users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
 
-    if "last_bill" not in data["users"].get(user_id, {}):
+    if not result or not result[0]:
         bot.send_message(message.chat.id, "❌ Bạn chưa gửi ảnh bill.")
         return
 
-    bill_photo = data["users"][user_id]["last_bill"]
+    bill_photo = result[0]
 
     keyboard = InlineKeyboardMarkup()
     keyboard.add(
@@ -153,14 +232,16 @@ def handle_admin_confirm(call):
 def process_add_money(message, user_id):
     try:
         amount = int(message.text)
-        data = load_data()
-        data["users"][user_id]["balance"] += amount
-        del data["users"][user_id]["last_bill"]
-        save_data(data)
+        cursor.execute("UPDATE users SET balance = balance + ?, last_bill = NULL WHERE user_id = ?", (amount, user_id))
+        conn.commit()
 
-        bot.send_message(user_id, f"✅ ĐÃ ĐƯỢC XÁC NHẬN, {amount} VND ĐÃ ĐƯỢC CỘNG VÀO TK.VỀ TRANG CHỦ NHẤN /start")
-        bot.send_message(ADMIN_ID, f"✔ Đã cộng {amount} VND cho user {user_id}.")
-    except:
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        new_balance = cursor.fetchone()[0]
+        formatted_balance = "{:,}".format(new_balance).replace(",", ".")
+
+        bot.send_message(int(user_id), f"✅ ĐÃ ĐƯỢC XÁC NHẬN, {amount:,} VND ĐÃ ĐƯỢC CỘNG VÀO TK. Số dư hiện tại: {amount:,} VND\n👉 VỀ TRANG CHỦ NHẤN /start")
+        bot.send_message(ADMIN_ID, f"✔ Đã cộng {amount:,} VND cho user {user_id}.")
+    except ValueError:
         bot.send_message(ADMIN_ID, "❌ Số tiền không hợp lệ. Hãy nhập lại số tiền.")
 
 @bot.callback_query_handler(func=lambda call: call.data.
@@ -179,18 +260,20 @@ def mua_link_step1(message):
 
 def mua_link_step2(message):
     link_vuot = message.text
-    user_id = str(message.chat.id)
-    data = load_data()
+    user_id = message.chat.id
 
     # Kiểm tra link vượt có tồn tại không
-    if link_vuot not in data["links"]:
+    cursor.execute("SELECT original_link, price FROM links WHERE bypass_link = ?", (link_vuot,))
+    link_result = cursor.fetchone()
+
+    if not link_result:
         bot.send_message(message.chat.id, "❌ Link không tồn tại hoặc chưa được update. Vui lòng thử lại.")
         return
 
     # Lấy thông tin link và số dư của khách hàng
-    link_info = data["links"][link_vuot]
-    price = link_info["price"]
-    balance = data["users"][user_id]["balance"]
+    original_link, price = link_result
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    balance = cursor.fetchone()[0]
 
     # Kiểm tra số dư của khách hàng
     if balance < price:
@@ -204,14 +287,18 @@ def mua_link_step2(message):
         return
 
     # Trừ tiền và gửi link cho khách hàng
-    data["users"][user_id]["balance"] -= price
-    save_data(data)
+    cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price, user_id))
+    conn.commit()
 
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    new_balance = cursor.fetchone()[0]
+
+    formatted_balance = "{:,}".format(int(new_balance)).replace(",", ".")
     bot.send_message(
         message.chat.id,
         f"🎉 Mua link thành công!\n"
-        f"🔗 Link của bạn: {link_info['url']}\n"
-        f"💰 Số dư còn lại: {data['users'][user_id]['balance']} VND\n"
+        f"🔗 Link của bạn: {original_link}\n"
+        f"💰 Số dư còn lại: {formatted_balance} VND\n"
         f"Nhấn /start để trở về trang chủ."
     )
 
@@ -265,13 +352,11 @@ def admin_add_link_step3(message, link_vuot):
     msg = bot.send_message(ADMIN_ID, "💰 Nhập *giá bán* (VND):")
     bot.register_next_step_handler(msg, admin_add_link_step4, link_vuot, link_goc)
 
-        
+
 def admin_add_link_step4(message, link_vuot, link_goc):
             try:
                 price = int(message.text)
-                data = load_data()
-                data["links"][link_vuot] = {"url": link_goc, "price": price}
-                save_data(data)
+                save_link(link_vuot, link_goc, price)
 
                 # Dùng escape_markdown để tránh lỗi khi gửi tin nhắn
                 msg_text = (
@@ -331,56 +416,56 @@ def handle_admin_callback(call):
 # Hàm xóa link
 def admin_delete_link(message):
     link_vuot = message.text
-    data = load_data()
-
-    if link_vuot in data["links"]:
-        del data["links"][link_vuot]
-        save_data(data)
+    cursor.execute("DELETE FROM links WHERE bypass_link = ?", (link_vuot,))
+    if cursor.rowcount > 0:
+        conn.commit()
         bot.send_message(message.chat.id, f"✅ Đã xóa link: {link_vuot}")
     else:
         bot.send_message(message.chat.id, "❌ Link không tồn tại.")
 
 # Hàm hiển thị danh sách người dùng
 def list_users(message):
-        data = load_data()
-        users = data["users"]
+        cursor.execute("SELECT user_id, balance FROM users")
+        users = cursor.fetchall()
 
         if not users:
             bot.send_message(message.chat.id, "❌ Không có người dùng nào.")
             return
 
         user_list = "👥 *Danh sách người dùng:*\n"
-        for user_id, user_data in users.items():
-            user_list += f"\\- ID: `{user_id}`, Số dư: `{user_data['balance']} VND`\n"
+        for user_id, balance in users:
+            formatted_balance = "{:,}".format(balance).replace(",", ".")
+            user_list += f"\\- ID: `{user_id}`, Số dư: `{formatted_balance} VND`\n"
 
         bot.send_message(message.chat.id, user_list, parse_mode="MarkdownV2")
 
 def list_links(message):
-        data = load_data()
-        links = data["links"]
+        cursor.execute("SELECT bypass_link, original_link, price FROM links")
+        links = cursor.fetchall()
 
         if not links:
             bot.send_message(message.chat.id, "❌ Không có link nào.")
             return
 
         link_list = "🔗 *Danh sách link:*\n"
-        for link_vuot, link_data in links.items():
-                formatted_price = "{:,}".format(link_data['price']).replace(",", ".")
+        for bypass_link, original_link, price in links:
+                formatted_price = "{:,}".format(price).replace(",", ".")
 
                 link_list += (
-                    f"\\- Link vượt: `{escape_markdown(link_vuot)}`\n"
-                    f"  Link gốc: `{escape_markdown(link_data['url'])}`\n"
+                    f"\\- Link vượt: `{escape_markdown(bypass_link)}`\n"
+                    f"  Link gốc: `{escape_markdown(original_link)}`\n"
                     f"  Giá: `{formatted_price} VND`\n"
-            )
+                )
 
         bot.send_message(message.chat.id, link_list, parse_mode="MarkdownV2")
 
 # Hàm cộng/trừ tiền người dùng
 def admin_adjust_balance_step1(message):
     user_id = message.text
-    data = load_data()
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
 
-    if user_id not in data["users"]:
+    if not result:
         bot.send_message(message.chat.id, "❌ Người dùng không tồn tại.")
         return
 
@@ -390,11 +475,14 @@ def admin_adjust_balance_step1(message):
 def admin_adjust_balance_step2(message, user_id):
     try:
         amount = int(message.text)
-        data = load_data()
-        data["users"][user_id]["balance"] += amount
-        save_data(data)
+        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        conn.commit()
 
-        bot.send_message(message.chat.id, f"✅ Đã điều chỉnh số dư của người dùng {user_id} thành {data['users'][user_id]['balance']} VND.")
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        new_balance = cursor.fetchone()[0]
+        formatted_balance = "{:,}".format(new_balance).replace(",", ".")
+
+        bot.send_message(message.chat.id, f"✅ Đã điều chỉnh số dư của người dùng {user_id} thành {formatted_balance} VND.")
     except ValueError:
         bot.send_message(message.chat.id, "❌ Số tiền không hợp lệ. Hãy nhập lại số nguyên.")
 
