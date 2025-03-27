@@ -1,9 +1,5 @@
 python-telegram-bot==20.3
-requests
-aiohttp
 pyTelegramBotAPI
-Flask
-cloudinary
-sqlite3
-gunicorn
 flask
+cloudinary
+gunicorn
