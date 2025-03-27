@@ -3,4 +3,7 @@ requests
 aiohttp
 pyTelegramBotAPI
 Flask
-dropbox
+cloudinary
+sqlite3
+gunicorn
+flask
