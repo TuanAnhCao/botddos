@@ -7,12 +7,22 @@ import cloudinary
 import cloudinary.uploader
 import cloudinary.api
 from telebot.formatting import escape_markdown
+import time
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import os
 
 # ✅ Cấu hình bot
 TOKEN = "7815604030:AAELtDIikq3XylIwzwITArq-kjrFP6EFwsM"  # Thay bằng token của bạn
 ADMIN_ID = 6283529520  # Thay bằng Telegram ID của admin (ví dụ: 6283529520)
 
-bot = telebot.TeleBot(TOKEN)
+# Tạo session với retry
+session = requests.Session()
+retries = Retry(total=5, backoff_factor=1, status_forcelist=[502, 503, 504])
+session.mount("https://", HTTPAdapter(max_retries=retries))
+
+bot = telebot.TeleBot(TOKEN, threaded=True)
 
 # Cấu hình Cloudinary
 cloudinary.config(
@@ -46,8 +56,7 @@ def upload_to_cloudinary(local_file_path, cloudinary_path):
 def download_from_cloudinary(cloudinary_path, local_file_path):
     try:
         url = cloudinary.api.resource(cloudinary_path, resource_type="raw")["url"]
-        import requests
-        response = requests.get(url, timeout=30)
+        response = session.get(url, timeout=30)
         with open(local_file_path, "wb") as f:
             f.write(response.content)
         print(f"✅ Đã tải {cloudinary_path} từ Cloudinary về {local_file_path}")
@@ -55,7 +64,7 @@ def download_from_cloudinary(cloudinary_path, local_file_path):
         print(f"❌ Lỗi khi tải từ Cloudinary: {str(e)}")
 
 # Khởi tạo database
-import os
+print("⏳ Khởi tạo database...")
 if not os.path.exists("database.db"):
     try:
         print("⏳ Đang tải database từ Cloudinary...")
@@ -91,46 +100,67 @@ if not os.path.exists("database.db"):
         ''')
         conn.commit()
         print("✅ Đã tạo database mới")
-
-# Tải database từ Cloudinary khi khởi động
-download_from_cloudinary("database.db", "database.db")
+else:
+    print("✅ File database.db đã tồn tại")
 
 # Kết nối database
-conn = sqlite3.connect("database.db", check_same_thread=False)
-cursor = conn.cursor()
+try:
+    conn = sqlite3.connect("database.db", check_same_thread=False)
+    cursor = conn.cursor()
+    print("✅ Kết nối database thành công")
+except Exception as e:
+    print(f"❌ Lỗi khi kết nối database: {str(e)}")
+    raise
 
-# Tạo bảng nếu chưa có
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        balance REAL DEFAULT 0,
-        last_bill TEXT
-    )
-''')
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        bypass_link TEXT UNIQUE,
-        original_link TEXT,
-        price REAL
-    )
-''')
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        amount REAL,
-        type TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-''')
-conn.commit()
+# Kiểm tra bảng
+try:
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    if cursor.fetchone() is None:
+        cursor.execute('''
+            CREATE TABLE users (
+                user_id INTEGER PRIMARY KEY,
+                balance REAL DEFAULT 0,
+                last_bill TEXT
+            )
+        ''')
+        print("✅ Đã tạo bảng users")
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='links'")
+    if cursor.fetchone() is None:
+        cursor.execute('''
+            CREATE TABLE links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bypass_link TEXT UNIQUE,
+                original_link TEXT,
+                price REAL
+            )
+        ''')
+        print("✅ Đã tạo bảng links")
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='transactions'")
+    if cursor.fetchone() is None:
+        cursor.execute('''
+            CREATE TABLE transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount REAL,
+                type TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        print("✅ Đã tạo bảng transactions")
+    conn.commit()
+except Exception as e:
+    print(f"❌ Lỗi khi kiểm tra/tạo bảng: {str(e)}")
+    raise
 
 # Hàm tiện ích
 def get_balance(user_id):
-    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone()
-    return result[0] if result else 0
+    try:
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        return result[0] if result else 0
+    except Exception as e:
+        print(f"❌ Lỗi khi lấy số dư: {str(e)}")
+        return 0
 
 def update_balance(user_id, amount):
     try:
@@ -157,10 +187,17 @@ def add_link(bypass_link, original_link, price):
         return "✅ Link đã được thêm!"
     except sqlite3.IntegrityError:
         return "⚠️ Link này đã tồn tại!"
+    except Exception as e:
+        print(f"❌ Lỗi khi thêm link: {str(e)}")
+        return "❌ Đã xảy ra lỗi!"
 
 def get_link(bypass_link):
-    cursor.execute("SELECT original_link, price FROM links WHERE bypass_link = ?", (bypass_link,))
-    return cursor.fetchone()
+    try:
+        cursor.execute("SELECT original_link, price FROM links WHERE bypass_link = ?", (bypass_link,))
+        return cursor.fetchone()
+    except Exception as e:
+        print(f"❌ Lỗi khi lấy link: {str(e)}")
+        return None
 
 def format_currency(amount):
     return "{:,}".format(int(float(amount))).replace(",", ".")
@@ -169,9 +206,24 @@ def format_currency(amount):
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
     user_id = message.chat.id
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
-    conn.commit()
-    bot.send_message(message.chat.id, "🤖 Chào mừng đến BOT mua link!\n💰 /nap_tien - Nạp tiền\n🔍 /so_du - Kiểm tra số dư\n🛒 /mua_link - Mua link")
+    print(f"📌 Nhận lệnh /start từ user_id: {user_id}")
+    try:
+        cursor.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
+        conn.commit()
+        print(f"✅ Đã thêm hoặc bỏ qua user_id {user_id} vào database")
+    except Exception as e:
+        print(f"❌ Lỗi khi thêm user_id {user_id} vào database: {str(e)}")
+        return
+    for attempt in range(5):
+        try:
+            bot.send_message(message.chat.id, "🤖 Chào mừng đến BOT mua link!\n💰 /nap_tien - Nạp tiền\n🔍 /so_du - Kiểm tra số dư\n🛒 /mua_link - Mua link", timeout=30)
+            print(f"✅ Đã gửi tin nhắn chào mừng đến {user_id}")
+            break
+        except Exception as e:
+            print(f"❌ Lỗi khi gửi tin nhắn /start (lần {attempt + 1}): {str(e)}")
+            if attempt == 4:
+                print("❌ Đã thử 5 lần nhưng vẫn thất bại.")
+            time.sleep(2 ** attempt)
 
 # Lệnh /so_du
 @bot.message_handler(commands=["so_du"])
@@ -276,10 +328,19 @@ def mua_link_step2(message):
     original_link, price = link_data
     balance = get_balance(user_id)
     if balance < price:
-        bot.send_message(message.chat.id, f"❌ Số dư không đủ!\n💵 Giá: {format_currency(price)} VND\n💰 Số dư: {format_currency(balance)} VND")
+        shortfall = price - balance  # Tính số tiền còn thiếu
+        formatted_price = format_currency(price)
+        formatted_balance = format_currency(balance)
+        formatted_shortfall = format_currency(shortfall)
+        bot.send_message(message.chat.id, 
+            f"❌ Số dư không đủ!\n"
+            f"💵 Giá: {formatted_price} VND\n"
+            f"💰 Số dư: {formatted_balance} VND\n"
+            f"📉 Bạn cần nạp thêm: {formatted_shortfall} VND để đủ tiền mua link này."
+        )
         return
     update_balance(user_id, -price)
-    bot.send_message(message.chat.id, f"🎉 Mua thành công!\n\n🔗 Link Gốc: {original_link}\n\n💰 Số dư còn lại: {format_currency(get_balance(user_id))} VND")
+    bot.send_message(message.chat.id, f"🎉 Mua thành công!\n🔗 Link: {original_link}\n💰 Số dư còn lại: {format_currency(get_balance(user_id))} VND")
 
 # Lệnh /admin
 @bot.message_handler(commands=["admin"])
@@ -363,8 +424,10 @@ def list_links(message):
         bot.send_message(message.chat.id, "❌ Không có link.")
         return
     link_list = "🔗 *Danh sách link:*\n"
-    for bypass_link, original_link, price in links:
-        link_list += f"- `{escape_markdown(bypass_link)}` -> `{escape_markdown(original_link)}` ({format_currency(price)} VND)\n"
+    for idx, (bypass_link, original_link, price) in enumerate(links, 1):
+        link_list += (f"{idx}. **Link vượt**: `{escape_markdown(bypass_link)}`\n"
+                      f"   **Link gốc**: `{escape_markdown(original_link)}`\n"
+                      f"   **Giá**: `{format_currency(price)} VND`\n\n")
     bot.send_message(message.chat.id, link_list, parse_mode="Markdown")
 
 # Lệnh /adjust_balance
@@ -429,4 +492,4 @@ def keep_alive():
 if __name__ == "__main__":
     print("Bot is starting...")
     keep_alive()
-    bot.polling(none_stop=True)
+    bot.polling(none_stop=True, interval=0, timeout=30)
