@@ -14,7 +14,7 @@ from urllib3.util.retry import Retry
 import os
 
 # ✅ Cấu hình bot
-TOKEN = "7815604030:AAELtDIikq3XylIwzwITArq-kjrFP6EFwsM"  # Thay bằng token của bạn
+TOKEN = "7470737695:AAG1hWkTivI1DiWZOc_CzBrmb8nbsguJU-U"  # Thay bằng token của bạn
 ADMIN_ID = 6283529520  # Thay bằng Telegram ID của admin (ví dụ: 6283529520)
 
 # Tạo session với retry
