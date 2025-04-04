@@ -11,11 +11,13 @@ import time
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from datetime import datetime, timedelta
+import io
 import os
 
 # ✅ Cấu hình bot
-TOKEN = "7470737695:AAG1hWkTivI1DiWZOc_CzBrmb8nbsguJU-U"  # Thay bằng token của bạn
-ADMIN_ID = 6283529520  # Thay bằng Telegram ID của admin (ví dụ: 6283529520)
+TOKEN = "7815604030:AAEHP1nN4caz7iV3oGq43I-6dQsuVfDT55Q"  # Thay bằng token của bạn
+ADMIN_ID = 1615483759  # Thay bằng Telegram ID của admin (ví dụ: 6283529520)
 
 # Tạo session với retry
 session = requests.Session()
@@ -53,6 +55,9 @@ def upload_to_cloudinary(local_file_path, cloudinary_path):
     except Exception as e:
         print(f"❌ Lỗi khi upload lên Cloudinary: {str(e)}")
 
+# ... (phần đầu mã giữ nguyên)
+
+# Hàm tải database từ Cloudinary
 def download_from_cloudinary(cloudinary_path, local_file_path):
     try:
         url = cloudinary.api.resource(cloudinary_path, resource_type="raw")["url"]
@@ -60,48 +65,23 @@ def download_from_cloudinary(cloudinary_path, local_file_path):
         with open(local_file_path, "wb") as f:
             f.write(response.content)
         print(f"✅ Đã tải {cloudinary_path} từ Cloudinary về {local_file_path}")
+        return True
     except Exception as e:
         print(f"❌ Lỗi khi tải từ Cloudinary: {str(e)}")
+        return False
 
 # Khởi tạo database
 print("⏳ Khởi tạo database...")
+
+# Kiểm tra và tạo file cục bộ nếu không tồn tại
 if not os.path.exists("database.db"):
-    try:
-        print("⏳ Đang tải database từ Cloudinary...")
-        download_from_cloudinary("database.db", "database.db")
-        print("✅ Đã tải database từ Cloudinary")
-    except Exception as e:
-        print(f"❌ Lỗi khi tải database: {str(e)}")
-        conn = sqlite3.connect("database.db")
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                balance REAL DEFAULT 0,
-                last_bill TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS links (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                bypass_link TEXT UNIQUE,
-                original_link TEXT,
-                price REAL
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                amount REAL,
-                type TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
-        print("✅ Đã tạo database mới")
-else:
-    print("✅ File database.db đã tồn tại")
+    print("⏳ File database.db không tồn tại, đang tạo file cục bộ...")
+    open("database.db", "a").close()  # Tạo file rỗng
+    print("✅ Đã tạo file database.db cục bộ")
+
+# Tải database từ Cloudinary và ghi đè lên file cục bộ
+print("⏳ Đang tải database từ Cloudinary...")
+success = download_from_cloudinary("database.db", "database.db")
 
 # Kết nối database
 try:
@@ -112,7 +92,7 @@ except Exception as e:
     print(f"❌ Lỗi khi kết nối database: {str(e)}")
     raise
 
-# Kiểm tra bảng
+# Kiểm tra và tạo bảng
 try:
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
     if cursor.fetchone() is None:
@@ -124,6 +104,18 @@ try:
             )
         ''')
         print("✅ Đã tạo bảng users")
+
+    # Kiểm tra và thêm cột vip_expiry
+    cursor.execute("PRAGMA table_info(users)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "vip_status" in columns:
+        cursor.execute("ALTER TABLE users DROP COLUMN vip_status")
+        print("✅ Đã xóa cột vip_status cũ")
+    if "vip_expiry" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN vip_expiry DATETIME")
+        print("✅ Đã thêm cột vip_expiry vào bảng users")
+
+    # Các bảng khác giữ nguyên
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='links'")
     if cursor.fetchone() is None:
         cursor.execute('''
@@ -131,26 +123,57 @@ try:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 bypass_link TEXT UNIQUE,
                 original_link TEXT,
-                price REAL
+                price REAL,
+                vip_only INTEGER DEFAULT 0
             )
         ''')
-        print("✅ Đã tạo bảng links")
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='transactions'")
-    if cursor.fetchone() is None:
-        cursor.execute('''
-            CREATE TABLE transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                amount REAL,
-                type TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        print("✅ Đã tạo bảng transactions")
+        print("✅ Đã tạo bảng links với cột vip_only")
+    else:
+        # Kiểm tra và thêm cột vip_only nếu chưa có
+        cursor.execute("PRAGMA table_info(links)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if "vip_only" not in columns:
+            cursor.execute("ALTER TABLE links ADD COLUMN vip_only INTEGER DEFAULT 0")
+            print("✅ Đã thêm cột vip_only vào bảng links")
     conn.commit()
 except Exception as e:
     print(f"❌ Lỗi khi kiểm tra/tạo bảng: {str(e)}")
     raise
+# ... (phần cuối mã giữ nguyên)
+#Thêm các hàm tiện ích cho VIP
+def is_vip(user_id):
+    try:
+        cursor.execute("SELECT vip_expiry FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        if result and result[0]:
+            expiry_date = datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S")
+            return expiry_date > datetime.now()
+        return False
+    except Exception as e:
+        print(f"❌ Lỗi khi kiểm tra VIP: {str(e)}")
+        return False
+
+def set_vip(user_id, days=7):
+    try:
+        expiry_date = datetime.now() + timedelta(days=days)
+        cursor.execute("UPDATE users SET vip_expiry = ? WHERE user_id = ?", (expiry_date.strftime("%Y-%m-%d %H:%M:%S"), user_id))
+        conn.commit()
+        upload_to_cloudinary("database.db", "database.db")
+        print(f"✅ Đã đặt VIP cho user {user_id}, hết hạn: {expiry_date}")
+    except Exception as e:
+        print(f"❌ Lỗi khi cập nhật VIP: {str(e)}")
+        conn.rollback()
+
+def get_vip_expiry(user_id):
+    try:
+        cursor.execute("SELECT vip_expiry FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        if result and result[0]:
+            return datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S")
+        return None
+    except Exception as e:
+        print(f"❌ Lỗi khi lấy thời gian hết hạn VIP: {str(e)}")
+        return None
 
 # Hàm tiện ích
 def get_balance(user_id):
@@ -177,11 +200,11 @@ def update_balance(user_id, amount):
         print(f"❌ Lỗi khi cập nhật số dư: {str(e)}")
         conn.rollback()
 
-def add_link(bypass_link, original_link, price):
+def add_link(bypass_link, original_link, price, vip_only=0):
     try:
         cursor.execute(
-            "INSERT INTO links (bypass_link, original_link, price) VALUES (?, ?, ?)",
-            (bypass_link, original_link, price))
+            "INSERT INTO links (bypass_link, original_link, price, vip_only) VALUES (?, ?, ?, ?)",
+            (bypass_link, original_link, price, vip_only))
         conn.commit()
         upload_to_cloudinary("database.db", "database.db")
         return "✅ Link đã được thêm!"
@@ -193,7 +216,7 @@ def add_link(bypass_link, original_link, price):
 
 def get_link(bypass_link):
     try:
-        cursor.execute("SELECT original_link, price FROM links WHERE bypass_link = ?", (bypass_link,))
+        cursor.execute("SELECT original_link, price, vip_only FROM links WHERE bypass_link = ?", (bypass_link,))
         return cursor.fetchone()
     except Exception as e:
         print(f"❌ Lỗi khi lấy link: {str(e)}")
@@ -216,7 +239,7 @@ def send_welcome(message):
         return
     for attempt in range(5):
         try:
-            bot.send_message(message.chat.id, "🤖 Chào mừng đến BOT mua link!\n💰 /nap_tien - Nạp tiền\n🔍 /so_du - Kiểm tra số dư\n🛒 /mua_link - Mua link", timeout=30)
+            bot.send_message(message.chat.id, "🤖 Chào mừng đến BOT mua link!\n💰 /nap_tien - Nạp tiền\n🔍 /so_du - Kiểm tra số dư\n🛒 /mua_link - Mua link\n🎖 /buy_vip - Mua VIP", timeout=30)
             print(f"✅ Đã gửi tin nhắn chào mừng đến {user_id}")
             break
         except Exception as e:
@@ -225,13 +248,66 @@ def send_welcome(message):
                 print("❌ Đã thử 5 lần nhưng vẫn thất bại.")
             time.sleep(2 ** attempt)
 
+#Thêm lệnh /vip
+@bot.message_handler(commands=["vip"])
+def check_vip(message):
+    user_id = message.chat.id
+    if is_vip(user_id):
+        expiry_date = get_vip_expiry(user_id)
+        expiry_str = expiry_date.strftime("%d/%m/%Y %H:%M:%S")
+        bot.send_message(user_id, f"🎖 Bạn là thành viên VIP!\n⏳ Hết hạn: {expiry_str}\n🎁 Bạn có thể mua tất cả các link với giá 0 VND.")
+    else:
+        bot.send_message(user_id, "❌ Bạn chưa là thành viên VIP. Dùng /buy_vip để nâng cấp (hiệu lực 7 ngày)!")
+
+
+# Lệnh /buy_vip
+@bot.message_handler(commands=["buy_vip"])
+def buy_vip(message):
+    user_id = message.chat.id
+    vip_price = 39000  # Giá VIP: 50,000 VND
+    balance = get_balance(user_id)
+
+    if is_vip(user_id):
+        expiry_date = get_vip_expiry(user_id)
+        expiry_str = expiry_date.strftime("%d/%m/%Y %H:%M:%S")
+        bot.send_message(user_id, f"🎖 Bạn đã là thành viên VIP rồi!\n⏳ Hết hạn: {expiry_str}")
+        return
+
+    if balance < vip_price:
+        shortfall = vip_price - balance
+        bot.send_message(user_id, 
+            f"❌ Số dư không đủ!\n"
+            f"💵 Giá VIP: {format_currency(vip_price)} VND\n"
+            f"💰 Số dư: {format_currency(balance)} VND\n"
+            f"📉 Bạn cần nạp thêm: {format_currency(shortfall)} VND\n"
+            f"👉 Dùng /nap_tien để nạp."
+        )
+        return
+
+    update_balance(user_id, -vip_price)
+    set_vip(user_id, days=7)
+    expiry_date = get_vip_expiry(user_id)
+    expiry_str = expiry_date.strftime("%d/%m/%Y %H:%M:%S")
+    bot.send_message(user_id, 
+        f"🎉 Chúc mừng! Bạn đã trở thành thành viên VIP.\n"
+        f"⏳ Hết hạn: {expiry_str}\n"
+        f"💰 Số dư còn lại: {format_currency(get_balance(user_id))} VND\n"
+        f"🎁 Bạn có thể mua tất cả các link với giá 0 VND trong 7 ngày!"
+    )
+
 # Lệnh /so_du
 @bot.message_handler(commands=["so_du"])
 def check_balance(message):
     user_id = message.chat.id
     balance = get_balance(user_id)
     formatted_balance = format_currency(balance)
-    bot.send_message(message.chat.id, f"💰 Số dư của bạn: {formatted_balance} VND")
+    if is_vip(user_id):
+        expiry_date = get_vip_expiry(user_id)
+        expiry_str = expiry_date.strftime("%d/%m/%Y %H:%M:%S")
+        vip_status = f"🎖 VIP - Mua link miễn phí\n⏳ Hết hạn: {expiry_str}"
+    else:
+        vip_status = "❌Không phải VIP\n✅VIP có thể mua tất cả các link với giá 0VND!\n✅Lấy Link hoặc File chỉ dành cho VIP !!!"
+    bot.send_message(message.chat.id, f"💰 Số dư của bạn: {formatted_balance} VND\n\n{vip_status}")
 
 # Lệnh /nap_tien
 @bot.message_handler(commands=["nap_tien"])
@@ -250,8 +326,11 @@ def deposit_money(message):
 def handle_bill_photo(message):
     user_id = message.chat.id
     file_id = message.photo[-1].file_id
+    file_info = bot.get_file(file_id)
+    file = bot.download_file(file_info.file_path)
+    cloudinary_response = cloudinary.uploader.upload(file, resource_type="image", public_id=f"bill_{user_id}")
     cursor.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
-    cursor.execute("UPDATE users SET last_bill = ? WHERE user_id = ?", (file_id, user_id))
+    cursor.execute("UPDATE users SET last_bill = ? WHERE user_id = ?", (cloudinary_response["url"], user_id))
     conn.commit()
     bot.send_message(message.chat.id, "✅ Bill đã được lưu! Nhấn /XACNHAN để gửi.")
 
@@ -325,32 +404,97 @@ def mua_link_step2(message):
     if not link_data:
         bot.send_message(message.chat.id, "❌ Link không tồn tại.")
         return
-    original_link, price = link_data
-    balance = get_balance(user_id)
-    if balance < price:
-        shortfall = price - balance  # Tính số tiền còn thiếu
-        formatted_price = format_currency(price)
-        formatted_balance = format_currency(balance)
-        formatted_shortfall = format_currency(shortfall)
-        bot.send_message(message.chat.id, 
-            f"❌ Số dư không đủ!\n"
-            f"💵 Giá: {formatted_price} VND\n"
-            f"💰 Số dư: {formatted_balance} VND\n"
-            f"📉 Bạn cần nạp thêm: {formatted_shortfall} VND để đủ tiền mua link này."
-        )
-        return
-    update_balance(user_id, -price)
-    bot.send_message(message.chat.id, f"🎉 Mua thành công!\n🔗 Link: {original_link}\n💰 Số dư còn lại: {format_currency(get_balance(user_id))} VND")
+    original_link, price, vip_only = link_data
 
+    # Kiểm tra nếu link chỉ dành cho VIP
+    if vip_only and not is_vip(user_id):
+        bot.send_message(message.chat.id, "❌ Link này chỉ dành cho thành viên VIP! Dùng /buy_vip để nâng cấp.")
+        return
+
+    # Kiểm tra giá cho VIP
+    if is_vip(user_id):
+        price = 0
+        bot.send_message(user_id, "🎖 Bạn là VIP, được mua link này với giá 0 VND!")
+    else:
+        balance = get_balance(user_id)
+        if balance < price:
+            shortfall = price - balance
+            formatted_price = format_currency(price)
+            formatted_balance = format_currency(balance)
+            formatted_shortfall = format_currency(shortfall)
+            bot.send_message(message.chat.id, 
+                f"❌ Số dư không đủ!\n"
+                f"💵 Giá: {formatted_price} VND\n"
+                f"💰 Số dư: {formatted_balance} VND\n"
+                f"📉 Bạn cần nạp thêm: {formatted_shortfall} VND để đủ tiền mua link này."
+            )
+            return
+
+    update_balance(user_id, -price)
+    bot.send_message(message.chat.id, 
+        f"🎉 Mua thành công!\n"
+        f"🔗 Link: {original_link}\n"
+        f"💰 Số dư còn lại: {format_currency(get_balance(user_id))} VND"
+    )
 # Lệnh /admin
 @bot.message_handler(commands=["admin"])
 def admin_menu(message):
     if message.chat.id != ADMIN_ID:
         bot.send_message(message.chat.id, "❌ Bạn không có quyền truy cập.")
         return
-    bot.send_message(message.chat.id, "👨‍💻 **Menu Admin**\n- /add_link : Thêm link\n- /delete_link : Xóa link\n- /list_users : Danh sách người dùng\n- /list_links : Danh sách link\n- /adjust_balance : Điều chỉnh số dư\n- /announcement : Gửi thông báo")
+    bot.send_message(message.chat.id, 
+        "👨‍💻 **Menu Admin**\n"
+        "- /add_link : Thêm link\n"
+        "- /delete_link : Xóa link\n"
+        "- /list_users : Danh sách người dùng\n"
+        "- /list_links : Danh sách link\n"
+        "- /adjust_balance : Điều chỉnh số dư\n"
+        "- /set_vip : Cấp/xóa VIP\n"
+        "- /announcement : Gửi thông báo"
+    )
 
-# Lệnh /add_link
+#Thêm lệnh /set_vip
+@bot.message_handler(commands=["set_vip"])
+def admin_set_vip_step1(message):
+    if message.chat.id != ADMIN_ID:
+        bot.send_message(message.chat.id, "❌ Bạn không có quyền.")
+        return
+    msg = bot.send_message(ADMIN_ID, "👤 Nhập ID người dùng:")
+    bot.register_next_step_handler(msg, admin_set_vip_step2)
+
+def admin_set_vip_step2(message):
+    user_id = message.text
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    if not cursor.fetchone():
+        bot.send_message(message.chat.id, "❌ Người dùng không tồn tại.")
+        return
+    msg = bot.send_message(ADMIN_ID, "⏳ Nhập số ngày VIP (0 để xóa):")
+    bot.register_next_step_handler(msg, admin_set_vip_step3, user_id)
+
+def admin_set_vip_step3(message, user_id):
+    try:
+        days = int(message.text)
+        if days < 0:
+            bot.send_message(ADMIN_ID, "❌ Số ngày không hợp lệ.")
+            return
+        if days == 0:
+            cursor.execute("UPDATE users SET vip_expiry = NULL WHERE user_id = ?", (user_id,))
+            conn.commit()
+            upload_to_cloudinary("database.db", "database.db")
+            bot.send_message(ADMIN_ID, f"✅ Đã xóa VIP của user {user_id}")
+            bot.send_message(int(user_id), "❌ Bạn không còn là thành viên VIP.")
+        else:
+            set_vip(int(user_id), days)
+            expiry_date = get_vip_expiry(user_id)
+            expiry_str = expiry_date.strftime("%d/%m/%Y %H:%M:%S")
+            bot.send_message(ADMIN_ID, f"✅ Đã cấp VIP cho user {user_id}, hết hạn: {expiry_str}")
+            bot.send_message(int(user_id), f"🎖 Bạn đã được cấp VIP!\n⏳ Hết hạn: {expiry_str}")
+    except ValueError:
+        bot.send_message(ADMIN_ID, "❌ Giá trị không hợp lệ.")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ Lỗi: {str(e)}")
+        
+# AddLINK      
 @bot.message_handler(commands=["add_link"])
 def admin_add_link_step1(message):
     if message.chat.id != ADMIN_ID:
@@ -361,7 +505,7 @@ def admin_add_link_step1(message):
 
 def admin_add_link_step2(message):
     bypass_link = message.text
-    msg = bot.send_message(ADMIN_ID, "🔗 Nhập link gốc:")
+    msg = bot.send_message(ADMIN_ID, "🔗 Nhập link origen:")
     bot.register_next_step_handler(msg, admin_add_link_step3, bypass_link)
 
 def admin_add_link_step3(message, bypass_link):
@@ -372,11 +516,23 @@ def admin_add_link_step3(message, bypass_link):
 def admin_add_link_step4(message, bypass_link, original_link):
     try:
         price = int(message.text)
-        result = add_link(bypass_link, original_link, price)
-        bot.send_message(ADMIN_ID, result)
+        msg = bot.send_message(ADMIN_ID, "🎖 Link chỉ dành cho VIP? (1 = Có, 0 = Không):")
+        bot.register_next_step_handler(msg, admin_add_link_step5, bypass_link, original_link, price)
     except ValueError:
         bot.send_message(ADMIN_ID, "❌ Giá phải là số nguyên.")
 
+def admin_add_link_step5(message, bypass_link, original_link, price):
+    try:
+        vip_only = int(message.text)
+        if vip_only not in [0, 1]:
+            bot.send_message(ADMIN_ID, "❌ Chỉ nhập 0 hoặc 1.")
+            return
+        result = add_link(bypass_link, original_link, price, vip_only)
+        vip_text = " (Chỉ dành cho VIP)" if vip_only else ""
+        bot.send_message(ADMIN_ID, f"{result}{vip_text}")
+    except ValueError:
+        bot.send_message(ADMIN_ID, "❌ Giá trị không hợp lệ.")
+        
 # Lệnh /delete_link
 @bot.message_handler(commands=["delete_link"])
 def admin_delete_link(message):
@@ -402,15 +558,27 @@ def list_users(message):
     if message.chat.id != ADMIN_ID:
         bot.send_message(message.chat.id, "❌ Bạn không có quyền.")
         return
-    cursor.execute("SELECT user_id, balance FROM users")
+    cursor.execute("SELECT user_id, balance, vip_expiry FROM users WHERE balance > 0")
     users = cursor.fetchall()
     if not users:
-        bot.send_message(message.chat.id, "❌ Không có người dùng.")
+        bot.send_message(message.chat.id, "❌ Không có người dùng nào có số dư lớn hơn 0.")
         return
-    user_list = "👥 *Danh sách người dùng:*\n"
-    for user_id, balance in users:
-        user_list += f"- ID: `{user_id}`, Số dư: `{format_currency(balance)} VND`\n"
-    bot.send_message(message.chat.id, user_list, parse_mode="Markdown")
+
+    user_list = "📋 Danh sách người dùng (Số dư > 0):\n"
+    for user_id, balance, vip_expiry in users:
+        vip_status = "🎖 VIP" if is_vip(user_id) else "❌ Không VIP"
+        if vip_expiry and is_vip(user_id):
+            expiry_date = datetime.strptime(vip_expiry, "%Y-%m-%d %H:%M:%S")
+            expiry_str = expiry_date.strftime("%d/%m/%Y %H:%M:%S")
+            vip_info = f" - Hết hạn: {expiry_str}"
+        else:
+            vip_info = ""
+        user_list += f"- ID: {user_id}, Số dư: {format_currency(balance)} VND, {vip_status}{vip_info}\n"
+
+    file = io.BytesIO(user_list.encode('utf-8'))
+    file.name = "user_list.txt"
+    bot.send_document(message.chat.id, file, caption="📋 Danh sách người dùng (Số dư > 0)")
+    file.close()
 
 # Lệnh /list_links
 @bot.message_handler(commands=["list_links"])
@@ -418,16 +586,17 @@ def list_links(message):
     if message.chat.id != ADMIN_ID:
         bot.send_message(message.chat.id, "❌ Bạn không có quyền.")
         return
-    cursor.execute("SELECT bypass_link, original_link, price FROM links")
+    cursor.execute("SELECT bypass_link, original_link, price, vip_only FROM links")
     links = cursor.fetchall()
     if not links:
         bot.send_message(message.chat.id, "❌ Không có link.")
         return
-    link_list = "🔗 *Danh sách link:*\n"
-    for idx, (bypass_link, original_link, price) in enumerate(links, 1):
+    link_list = "🔗 *Danh sách link:*\n\n"
+    for idx, (bypass_link, original_link, price, vip_only) in enumerate(links, 1):
+        vip_text = " (Chỉ VIP)" if vip_only else ""
         link_list += (f"{idx}. **Link vượt**: `{escape_markdown(bypass_link)}`\n"
                       f"   **Link gốc**: `{escape_markdown(original_link)}`\n"
-                      f"   **Giá**: `{format_currency(price)} VND`\n\n")
+                      f"   **Giá**: `{format_currency(price)} VND`{vip_text}\n\n")
     bot.send_message(message.chat.id, link_list, parse_mode="Markdown")
 
 # Lệnh /adjust_balance
@@ -477,8 +646,9 @@ def process_announcement(message):
     success_count = 0
     for (user_id,) in users:
         try:
-            bot.send_message(user_id, f"📢 *Thông báo từ Admin:*\n{content}", parse_mode="Markdown")
+            bot.send_message(user_id, f"📢 *Thông báo từ BIGCHANG:*\n{content}", parse_mode="Markdown")
             success_count += 1
+            time.sleep(0.05)  # Độ trễ 50ms giữa các tin nhắn
         except:
             pass
     bot.send_message(ADMIN_ID, f"✅ Đã gửi thông báo đến {success_count} người dùng.")
