@@ -16,7 +16,7 @@ import io
 import os
 
 # ✅ Cấu hình bot
-TOKEN = "7815604030:AAEHP1nN4caz7iV3oGq43I-6dQsuVfDT55Q"  # Thay bằng token của bạn
+TOKEN = "6373184346:AAEBWgWlgUGesX8M18IJHcaI9g46gVDkTBM"  # Thay bằng token của bạn
 ADMIN_ID = 1615483759  # Thay bằng Telegram ID của admin (ví dụ: 6283529520)
 
 # Tạo session với retry
